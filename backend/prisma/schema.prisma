@@ -1,0 +1,249 @@
+// Dental Clinic Platform — Prisma Schema
+// Database: PostgreSQL (Supabase)
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+// ─────────────────────────────────────────────
+// ENUMS
+// ─────────────────────────────────────────────
+
+enum Role {
+  ADMIN
+  DOCTOR
+  RECEPTIONIST
+  PATIENT
+}
+
+enum AppointmentStatus {
+  SCHEDULED
+  CONFIRMED
+  COMPLETED
+  CANCELLED
+  NO_SHOW
+}
+
+enum Gender {
+  MALE
+  FEMALE
+  OTHER
+}
+
+enum ReportStatus {
+  DRAFT
+  SIGNED
+}
+
+// ─────────────────────────────────────────────
+// USERS & ROLES
+// ─────────────────────────────────────────────
+
+model User {
+  id        String   @id @default(cuid())
+  clerkId   String   @unique // Clerk user ID
+  email     String   @unique
+  firstName String
+  lastName  String
+  phone     String?
+  role      Role
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Role-specific profiles (one-to-one)
+  doctorProfile       DoctorProfile?
+  receptionistProfile ReceptionistProfile?
+  patientProfile      PatientProfile?
+
+  // Audit log
+  auditLogs AuditLog[]
+
+  @@map("users")
+}
+
+model DoctorProfile {
+  id             String  @id @default(cuid())
+  userId         String  @unique
+  user           User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  specialty      String
+  licenseNumber  String  @unique
+  biography      String?
+  workingHours   Json?   // { monday: { start: "09:00", end: "17:00" }, ... }
+  color          String  @default("#3B82F6") // calendar color
+
+  appointments Appointment[]
+  visits       Visit[]
+
+  @@map("doctor_profiles")
+}
+
+model ReceptionistProfile {
+  id     String @id @default(cuid())
+  userId String @unique
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("receptionist_profiles")
+}
+
+model PatientProfile {
+  id          String    @id @default(cuid())
+  userId      String    @unique
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  dateOfBirth DateTime?
+  gender      Gender?
+  address     String?
+  city        String?
+  bloodType   String?
+  allergies   String[]  // array of allergy strings
+  medicalNotes String?  // general medical history
+  emergencyContactName  String?
+  emergencyContactPhone String?
+  emiratesId    String?   @unique @map("emirates_id")
+  inviteToken String?   @unique // used for email-invite account creation
+  inviteUsedAt DateTime?
+
+  appointments Appointment[]
+  visits       Visit[]
+
+  @@map("patient_profiles")
+}
+
+// ─────────────────────────────────────────────
+// APPOINTMENTS
+// ─────────────────────────────────────────────
+
+model Appointment {
+  id        String            @id @default(cuid())
+  doctorId  String
+  doctor    DoctorProfile     @relation(fields: [doctorId], references: [id])
+  patientId String
+  patient   PatientProfile    @relation(fields: [patientId], references: [id])
+  startTime DateTime
+  endTime   DateTime
+  status    AppointmentStatus @default(SCHEDULED)
+  reason    String?           // chief complaint / reason for visit
+  notes     String?           // receptionist notes
+  isFirstVisit Boolean       @default(false)
+  createdAt DateTime          @default(now())
+  updatedAt DateTime          @updatedAt
+
+  // Resulting visit (created when appointment is completed)
+  visit Visit?
+
+  // Notifications sent for this appointment
+  notifications Notification[]
+
+  @@map("appointments")
+}
+
+// ─────────────────────────────────────────────
+// VISITS & MEDICAL REPORTS
+// ─────────────────────────────────────────────
+
+model Visit {
+  id            String         @id @default(cuid())
+  appointmentId String         @unique
+  appointment   Appointment    @relation(fields: [appointmentId], references: [id])
+  doctorId      String
+  doctor        DoctorProfile  @relation(fields: [doctorId], references: [id])
+  patientId     String
+  patient       PatientProfile @relation(fields: [patientId], references: [id])
+  visitDate     DateTime
+  chiefComplaint String?
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+
+  // Medical report generated from this visit
+  report Report?
+
+  @@map("visits")
+}
+
+model Report {
+  id         String       @id @default(cuid())
+  visitId    String       @unique
+  visit      Visit        @relation(fields: [visitId], references: [id])
+  status     ReportStatus @default(DRAFT)
+
+  // Raw voice transcription (from Whisper API)
+  transcription String?
+
+  // Structured report fields (populated by Claude API)
+  diagnosis    String?
+  treatment    String?
+  observations String?
+  prescription String?
+  followUpIn   String?   // e.g. "3 months", "6 weeks"
+  rawStructured Json?    // full structured output from Claude
+
+  // Doctor review
+  signedAt   DateTime?
+  signedById String?   // doctor userId who signed
+
+  // Patient-accessible PDF
+  pdfUrl     String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("reports")
+}
+
+// ─────────────────────────────────────────────
+// NOTIFICATIONS
+// ─────────────────────────────────────────────
+
+enum NotificationChannel {
+  EMAIL
+  SMS
+}
+
+enum NotificationType {
+  APPOINTMENT_CONFIRMATION
+  APPOINTMENT_REMINDER_24H
+  APPOINTMENT_REMINDER_1H
+  APPOINTMENT_CANCELLED
+  REPORT_AVAILABLE
+  ACCOUNT_INVITE
+}
+
+model Notification {
+  id            String              @id @default(cuid())
+  appointmentId String?
+  appointment   Appointment?        @relation(fields: [appointmentId], references: [id])
+  channel       NotificationChannel
+  type          NotificationType
+  recipientEmail String?
+  recipientPhone String?
+  sentAt        DateTime?
+  status        String              @default("PENDING") // PENDING | SENT | FAILED
+  errorMessage  String?
+  createdAt     DateTime            @default(now())
+
+  @@map("notifications")
+}
+
+// ─────────────────────────────────────────────
+// AUDIT LOG (Security / UAE PDPL compliance)
+// ─────────────────────────────────────────────
+
+model AuditLog {
+  id         String   @id @default(cuid())
+  userId     String
+  user       User     @relation(fields: [userId], references: [id])
+  action     String   // e.g. "VIEW_PATIENT_REPORT", "SIGN_REPORT", "UPDATE_APPOINTMENT"
+  resource   String   // e.g. "Report", "Appointment"
+  resourceId String?
+  ipAddress  String?
+  userAgent  String?
+  createdAt  DateTime @default(now())
+
+  @@map("audit_logs")
+}
